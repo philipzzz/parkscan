@@ -1,0 +1,16 @@
+# dependencies / build
+node_modules/
+.next/
+.venv/
+__pycache__/
+*.pyc
+tsconfig.tsbuildinfo
+
+# runtime data (not source — contains real plates / evidence photos)
+backend/parking.db
+backend/photos/
+*.log
+
+# local
+.DS_Store
+.claude/settings.local.json

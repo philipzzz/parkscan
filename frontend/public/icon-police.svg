@@ -1,0 +1,5 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100">
+  <rect width="100" height="100" rx="24" fill="#3b6fc0"/>
+  <path d="M50 18 L76 28 v22 c0 16-11 26-26 32-15-6-26-16-26-32 V28 Z" fill="#ffffff"/>
+  <text x="50" y="59" font-family="ui-monospace, monospace" font-size="26" font-weight="bold" text-anchor="middle" fill="#3b6fc0">P</text>
+</svg>

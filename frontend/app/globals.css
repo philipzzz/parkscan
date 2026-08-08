@@ -1,0 +1,107 @@
+@import "tailwindcss";
+
+/*
+ * TRAX Design System tokens — warm ivory palette
+ */
+@theme {
+  --font-serif: var(--font-serif);
+  --font-sans: var(--font-sans);
+  --font-mono: var(--font-mono);
+
+  --color-ivory: #faf9f5;
+  --color-ivory-2: #f0eee6;
+  --color-ivory-3: #e8e6dc;
+
+  --color-white: #ffffff;
+
+  --color-slate: #141413;
+  --color-slate-2: #3d3d3a;
+  --color-slate-3: #5e5d59;
+
+  --color-cloud: #87867f;
+  --color-cloud-2: #b0aea5;
+  --color-cloud-3: #d1cfc5;
+
+  --color-clay: #d97757;
+  --color-clay-dk: #c6613f;
+
+  --color-green: #2d7a3a;
+  --color-green-bg: #edf5ee;
+
+  --color-amber: #a05c0a;
+  --color-amber-bg: #fdf5ea;
+
+  --color-red: #b42525;
+  --color-red-bg: #fcefef;
+
+  --color-blue: #3b6fc0;
+  --color-blue-bg: #eef3fb;
+
+  --color-border: rgba(20, 20, 19, 0.06);
+
+  --radius-sm: 8px;
+  --radius-md: 12px;
+  --radius-lg: 16px;
+  --radius-pill: 999px;
+}
+
+body {
+  background: var(--color-ivory);
+  color: var(--color-slate);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  -webkit-tap-highlight-color: transparent;
+  overscroll-behavior-y: none;
+}
+
+::selection {
+  background: rgba(217, 119, 87, 0.18);
+}
+
+/* Motion */
+@keyframes sheet-up {
+  from { transform: translateY(100%); }
+  to { transform: translateY(0); }
+}
+@keyframes fade-in {
+  from { opacity: 0; transform: translateY(6px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+@keyframes pop-in {
+  0% { opacity: 0; transform: scale(0.6); }
+  60% { transform: scale(1.08); }
+  100% { opacity: 1; transform: scale(1); }
+}
+@keyframes reticle-pulse {
+  0%, 100% { border-color: rgba(255, 255, 255, 0.85); }
+  50% { border-color: rgba(255, 255, 255, 0.4); }
+}
+.animate-sheet-up { animation: sheet-up 0.38s cubic-bezier(0.32, 0.72, 0, 1); }
+.animate-fade-in { animation: fade-in 0.3s ease both; }
+.animate-pop-in { animation: pop-in 0.45s cubic-bezier(0.34, 1.56, 0.64, 1) both; }
+.animate-reticle { animation: reticle-pulse 2.2s ease-in-out infinite; }
+
+/* Stagger helper for lists */
+.stagger > * { animation: fade-in 0.35s ease both; }
+.stagger > *:nth-child(2) { animation-delay: 0.05s; }
+.stagger > *:nth-child(3) { animation-delay: 0.1s; }
+.stagger > *:nth-child(4) { animation-delay: 0.15s; }
+.stagger > *:nth-child(5) { animation-delay: 0.2s; }
+.stagger > *:nth-child(6) { animation-delay: 0.25s; }
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}
+
+/* Safe area insets for PWA */
+@supports (padding-bottom: env(safe-area-inset-bottom)) {
+  body {
+    padding-bottom: env(safe-area-inset-bottom);
+  }
+}
