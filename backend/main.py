@@ -690,16 +690,26 @@ def remember_camera_mac(url: str):
         set_setting("rtsp_mac", mac)
 
 
+# A camera that is briefly offline should come back within seconds; one that is
+# unplugged for a week must not cost a reconnect attempt and a full subnet scan
+# every fifteen seconds forever. The poll interval therefore backs off from the
+# first to the second, and snaps back the moment the camera answers again.
+WATCHDOG_INTERVAL = 15
+WATCHDOG_MAX_INTERVAL = 600
+
+
 def camera_watchdog():
     """Keep the saved camera alive: reconnect on drop, rediscover on IP change."""
     time.sleep(2)  # let the app finish starting
     failures = 0
+    interval = WATCHDOG_INTERVAL
     while True:
         url = get_setting("rtsp_url")
         if url and not camera.connected:
             if camera.connect(url)["connected"]:
                 remember_camera_mac(url)  # keep the hardware pin fresh
                 failures = 0
+                interval = WATCHDOG_INTERVAL
             else:
                 failures += 1
                 # A couple of plain retries first — a brief network blip
@@ -707,11 +717,14 @@ def camera_watchdog():
                 if failures >= 3:
                     if rediscover_camera(url):
                         failures = 0
+                        interval = WATCHDOG_INTERVAL
                     else:
                         failures = 0  # start the cycle over rather than scan on a loop
+                        interval = min(interval * 2, WATCHDOG_MAX_INTERVAL)
         else:
             failures = 0
-        time.sleep(15)
+            interval = WATCHDOG_INTERVAL
+        time.sleep(interval)
 
 
 threading.Thread(target=camera_watchdog, daemon=True).start()
