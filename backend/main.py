@@ -61,7 +61,7 @@ _sess.inter_op_num_threads = 1
 alpr = ALPR(
     detector_model="yolo-v9-s-608-license-plate-end2end",
     detector_sess_options=_sess,
-    ocr_model="cct-s-v2-global-model",
+    ocr_model="cct-xs-v2-global-model",
     ocr_sess_options=_sess,
 )
 print("ALPR ready.")
