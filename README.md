@@ -132,8 +132,23 @@ behind a Cloudflare Tunnel:
 | `parkscan-frontend.service` | `next start` | `:3010`, reached through the tunnel |
 
 The frontend talks to the backend over `BACKEND_URL=http://127.0.0.1:8010`; the API is
-never exposed directly. Both units are `enabled` with `Restart=always`. Deploying is
-`git pull` and a restart of the affected unit.
+never exposed directly. Both units are `enabled` with `Restart=always`.
+
+Deploying:
+
+- **Backend**: `git pull`, restart `parkscan-backend`.
+- **Frontend**: `git pull`, then rebuild **with the backend URL in the environment**, then
+  restart `parkscan-frontend`:
+
+  ```bash
+  cd frontend && BACKEND_URL=http://127.0.0.1:8010 npm run build
+  ```
+
+  The `/api/backend` rewrite in `next.config.ts` is resolved at **build** time, not when
+  `next start` runs, so the unit's `Environment=BACKEND_URL` does not reach it. A build
+  without it bakes in the default `127.0.0.1:8000` (another service on this box): every
+  page loads but every API call 404s. Check with
+  `grep -o "127.0.0.1:80[0-9]*" .next/routes-manifest.json` — it must say `8010`.
 
 ## Current status
 
