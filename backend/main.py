@@ -756,21 +756,70 @@ def camera_frame():
     )
 
 
+# A fixed camera watching parked cars sees the same picture for hours. Re-running
+# ALPR on it every poll costs ~250 ms of CPU for an identical answer, so the
+# plate reads are reused until the scene changes. Payment status is NOT reused:
+# a driver can pay while the picture stays exactly the same.
+SCENE_CHANGE_THRESHOLD = 6.0  # mean abs grey diff (0-255) on a 64x36 thumbnail
+SCENE_MAX_AGE_S = 30  # re-read anyway, so slow drift (dusk) can't pin a stale read
+_scene_lock = threading.Lock()
+_scene = {"thumb": None, "reads": None, "at": 0.0, "shape": None}
+
+
+def _scene_thumb(frame: np.ndarray) -> np.ndarray:
+    grey = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+    return cv2.resize(grey, (64, 36), interpolation=cv2.INTER_AREA).astype(np.float32)
+
+
 @app.get("/cctv/camera/analyse")
 def camera_analyse(zone_id: str = "MBJB-A1"):
     """Run the multi-plate CCTV pipeline on the newest live frame."""
     frame = camera.latest()
     if frame is None:
         return {"vehicles": [], "frame": None, "error": camera.error or "No frame yet"}
-    rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-    vehicles = detect_all_plates(rgb, zone_id)
     h, w = frame.shape[:2]
-    return {"vehicles": vehicles, "frame": {"w": w, "h": h}}
+    thumb = _scene_thumb(frame)
+    with _scene_lock:
+        prev = _scene["thumb"]
+        fresh = (
+            prev is not None
+            and _scene["shape"] == (h, w)
+            and time.time() - _scene["at"] < SCENE_MAX_AGE_S
+            and float(np.abs(thumb - prev).mean()) <= SCENE_CHANGE_THRESHOLD
+        )
+        reads = _scene["reads"] if fresh else None
+    if reads is None:
+        reads = read_all_plates(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
+        with _scene_lock:
+            _scene.update(thumb=thumb, reads=reads, at=time.time(), shape=(h, w))
+    return {
+        "vehicles": with_payment_status(reads, zone_id),
+        "frame": {"w": w, "h": h},
+        "reused": fresh,
+    }
 
 
 def detect_all_plates(frame: np.ndarray, zone_id: str) -> list[dict]:
     """Every plausible plate in the frame, with box + payment status."""
+    return with_payment_status(read_all_plates(frame), zone_id)
+
+
+def with_payment_status(reads: list[dict], zone_id: str) -> list[dict]:
+    """Attach status to plate reads. Cheap (DB only), so it runs on every poll."""
     vehicles = []
+    for read in reads:
+        entry = {k: v for k, v in read.items() if k != "format_ok"}
+        if not read["format_ok"] or read["confidence"] < CONFIDENCE_THRESHOLD:
+            entry.update(status="uncertain", detail="Low confidence read")
+        else:
+            entry.update(**payment_status(read["plate"], zone_id))
+        vehicles.append(entry)
+    return vehicles
+
+
+def read_all_plates(frame: np.ndarray) -> list[dict]:
+    """Every plausible plate in the frame: text, confidence, box. No DB access."""
+    reads = []
     for r in alpr.predict(frame):
         if not r.ocr or not r.ocr.text:
             continue
@@ -784,23 +833,20 @@ def detect_all_plates(frame: np.ndarray, zone_id: str) -> list[dict]:
         plate, format_ok = coerce_malaysian(normalize_plate(r.ocr.text))
         if len(plate) < MIN_PLATE_CHARS:
             continue
-        confidence = round(ocr_confidence(r.ocr), 3)
-        entry = {
-            "plate": plate,
-            "confidence": confidence,
-            "box": {
-                "x1": round(bb.x1),
-                "y1": round(bb.y1),
-                "x2": round(bb.x2),
-                "y2": round(bb.y2),
-            },
-        }
-        if not format_ok or confidence < CONFIDENCE_THRESHOLD:
-            entry.update(status="uncertain", detail="Low confidence read")
-        else:
-            entry.update(**payment_status(plate, zone_id))
-        vehicles.append(entry)
-    return vehicles
+        reads.append(
+            {
+                "plate": plate,
+                "confidence": round(ocr_confidence(r.ocr), 3),
+                "format_ok": format_ok,
+                "box": {
+                    "x1": round(bb.x1),
+                    "y1": round(bb.y1),
+                    "x2": round(bb.x2),
+                    "y2": round(bb.y2),
+                },
+            }
+        )
+    return reads
 
 
 @app.post("/cctv/scan")

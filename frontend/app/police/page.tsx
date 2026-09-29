@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
+import { StableGate, captureJpeg, scanDebugEnabled, useScanLoop, type Crop } from "@/lib/scan";
 import {
   Car,
   Check,
@@ -47,12 +48,19 @@ function ExpiryPill({ label, e }: { label: string; e: Expiry }) {
   );
 }
 
+
+// The reticle: where the officer is told to put the plate. Only this part is sent.
+const PLATE_CROP: Crop = { x: 0.15, y: 0.3, w: 0.7, h: 0.4 };
+
 export default function PolicePage() {
   const videoRef = useRef<HTMLVideoElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
-  const busyRef = useRef(false);
   const frozenRef = useRef(false);
   const readsRef = useRef<string[]>([]);
+  const gateRef = useRef<StableGate | null>(null);
+  const scanStartRef = useRef(0);
+  const debugRef = useRef(false);
+  const [debug, setDebug] = useState("");
 
   const [cameraError, setCameraError] = useState("");
   const [hint, setHint] = useState("");
@@ -68,8 +76,9 @@ export default function PolicePage() {
       .getUserMedia({
         video: {
           facingMode: "environment",
-          width: { ideal: 1920 },
-          height: { ideal: 1080 },
+          // 720p is plenty: the upload is cut to 960 px wide anyway
+          width: { ideal: 1280 },
+          height: { ideal: 720 },
         },
       })
       .then((s) => {
@@ -101,58 +110,53 @@ export default function PolicePage() {
     navigator.vibrate?.(data.stolen ? [150, 80, 150, 80, 150] : 100);
   }, []);
 
-  const captureAndScan = useCallback(async () => {
+  useEffect(() => {
+    debugRef.current = scanDebugEnabled();
+    scanStartRef.current = performance.now();
+  }, []);
+
+  const captureAndScan = useCallback(async (): Promise<boolean> => {
     const video = videoRef.current;
     const canvas = canvasRef.current;
-    if (!video || !canvas || video.readyState < 2) return;
-    if (busyRef.current || frozenRef.current) return;
-    busyRef.current = true;
+    if (!video || !canvas || video.readyState < 2 || frozenRef.current) return false;
+    const gate = (gateRef.current ??= new StableGate(PLATE_CROP));
+    if (!gate.shouldSend(video)) return false;
 
-    const vw = video.videoWidth;
-    const vh = video.videoHeight;
-    canvas.width = vw * 0.7;
-    canvas.height = vh * 0.4;
-    canvas
-      .getContext("2d")!
-      .drawImage(video, vw * 0.15, vh * 0.3, vw * 0.7, vh * 0.4, 0, 0, canvas.width, canvas.height);
+    const t0 = performance.now();
+    const { blob } = await captureJpeg(video, canvas, PLATE_CROP, 960, 0.75);
+    const form = new FormData();
+    form.append("image", blob, "frame.jpg");
+    const r = await fetch("/api/backend/identify", { method: "POST", body: form });
+    const data = await r.json();
+    const ms = Math.round(performance.now() - t0);
+    const kb = Math.round(blob.size / 1024);
 
-    try {
-      const blob: Blob = await new Promise((res) =>
-        canvas.toBlob((b) => res(b!), "image/jpeg", 0.9)
-      );
-      const form = new FormData();
-      form.append("image", blob, "frame.jpg");
-      const r = await fetch("/api/backend/identify", { method: "POST", body: form });
-      const data = await r.json();
+    if (data.found && data.plate) {
+      const reads = readsRef.current;
+      reads.push(data.plate);
+      if (reads.length > 3) reads.shift();
+      const agreed = reads.length >= 2 && reads[reads.length - 2] === data.plate;
+      const veryConfident = (data.confidence ?? 0) >= 0.93 && data.format_ok;
 
-      if (data.found && data.plate) {
-        const reads = readsRef.current;
-        reads.push(data.plate);
-        if (reads.length > 3) reads.shift();
-        const agreed = reads.length >= 2 && reads[reads.length - 2] === data.plate;
-        const veryConfident = (data.confidence ?? 0) >= 0.93 && data.format_ok;
-
-        if (agreed || veryConfident) {
-          readsRef.current = [];
-          setHint("");
-          await lookup(data.plate);
-        } else {
-          setHint(data.plate);
-        }
-      } else {
+      if (agreed || veryConfident) {
+        readsRef.current = [];
         setHint("");
+        if (debugRef.current) {
+          const total = ((performance.now() - scanStartRef.current) / 1000).toFixed(1);
+          setDebug(`read in ${total}s since scanning started · last frame ${kb}KB ${ms}ms`);
+        }
+        await lookup(data.plate);
+        return true;
       }
-    } catch {
-      // retry next tick
-    } finally {
-      busyRef.current = false;
+      setHint(data.plate);
+    } else {
+      setHint("");
     }
+    if (debugRef.current) setDebug(`motion ${gate.motion.toFixed(1)} · ${kb}KB · ${ms}ms`);
+    return true;
   }, [lookup]);
 
-  useEffect(() => {
-    const id = setInterval(captureAndScan, 600);
-    return () => clearInterval(id);
-  }, [captureAndScan]);
+  useScanLoop(captureAndScan, true);
 
   function resume() {
     setVehicle(null);
@@ -161,6 +165,7 @@ export default function PolicePage() {
     setHint("");
     readsRef.current = [];
     frozenRef.current = false;
+    scanStartRef.current = performance.now();
   }
 
   return (
@@ -191,6 +196,11 @@ export default function PolicePage() {
         className="absolute inset-0 w-full h-full object-cover"
       />
       <canvas ref={canvasRef} className="hidden" />
+      {debug && (
+        <div className="absolute left-2 bottom-2 z-30 rounded bg-black/70 px-2 py-1 font-mono text-[11px] text-white">
+          {debug}
+        </div>
+      )}
 
       {cameraError && !vehicle && !manualMode && (
         <div className="absolute inset-0 flex items-center justify-center p-8 bg-ivory">

@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
+import { StableGate, captureJpeg, scanDebugEnabled, useScanLoop, type Crop } from "@/lib/scan";
 import {
   Camera,
   ChevronDown,
@@ -29,11 +30,18 @@ type Session = {
 const fmtTime = (d: Date | string) =>
   new Date(d).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
 
+
+// The reticle: where the user is told to put the plate. Only this part is sent.
+const PLATE_CROP: Crop = { x: 0.15, y: 0.3, w: 0.7, h: 0.4 };
+
 export default function PayPage() {
   const videoRef = useRef<HTMLVideoElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
-  const busyRef = useRef(false);
   const readsRef = useRef<string[]>([]);
+  const gateRef = useRef<StableGate | null>(null);
+  const scanStartRef = useRef(0);
+  const debugRef = useRef(false);
+  const [debug, setDebug] = useState("");
 
   const [step, setStep] = useState<"camera" | "confirm" | "paid">("camera");
   const [cameraError, setCameraError] = useState("");
@@ -99,8 +107,9 @@ export default function PayPage() {
       .getUserMedia({
         video: {
           facingMode: "environment",
-          width: { ideal: 1920 },
-          height: { ideal: 1080 },
+          // 720p is plenty: the upload is cut to 960 px wide anyway
+          width: { ideal: 1280 },
+          height: { ideal: 720 },
         },
       })
       .then((s) => {
@@ -123,62 +132,61 @@ export default function PayPage() {
     };
   }, [step]);
 
-  const captureAndIdentify = useCallback(async () => {
-    const video = videoRef.current;
-    const canvas = canvasRef.current;
-    if (!video || !canvas || video.readyState < 2) return;
-    if (busyRef.current) return;
-    busyRef.current = true;
-
-    const vw = video.videoWidth;
-    const vh = video.videoHeight;
-    canvas.width = vw * 0.7;
-    canvas.height = vh * 0.4;
-    canvas
-      .getContext("2d")!
-      .drawImage(video, vw * 0.15, vh * 0.3, vw * 0.7, vh * 0.4, 0, 0, canvas.width, canvas.height);
-
-    try {
-      const blob: Blob = await new Promise((res) =>
-        canvas.toBlob((b) => res(b!), "image/jpeg", 0.9)
-      );
-      const form = new FormData();
-      form.append("image", blob, "frame.jpg");
-      const r = await fetch("/api/backend/identify", { method: "POST", body: form });
-      const data = await r.json();
-
-      if (data.found && data.plate) {
-        const reads = readsRef.current;
-        reads.push(data.plate);
-        if (reads.length > 3) reads.shift();
-        const agreed = reads.length >= 2 && reads[reads.length - 2] === data.plate;
-        const veryConfident = (data.confidence ?? 0) >= 0.93 && data.format_ok;
-
-        if (agreed || veryConfident) {
-          readsRef.current = [];
-          setPlate(data.plate);
-          setPhoto(data.photo);
-          setHint("");
-          setStep("confirm");
-          navigator.vibrate?.(80);
-        } else {
-          setHint(data.plate);
-        }
-      } else {
-        setHint("");
-      }
-    } catch {
-      // retry next tick
-    } finally {
-      busyRef.current = false;
-    }
+  useEffect(() => {
+    debugRef.current = scanDebugEnabled();
   }, []);
 
   useEffect(() => {
     if (step !== "camera") return;
-    const id = setInterval(captureAndIdentify, 700);
-    return () => clearInterval(id);
-  }, [step, captureAndIdentify]);
+    readsRef.current = [];
+    scanStartRef.current = performance.now();
+  }, [step]);
+
+  const captureAndIdentify = useCallback(async (): Promise<boolean> => {
+    const video = videoRef.current;
+    const canvas = canvasRef.current;
+    if (!video || !canvas || video.readyState < 2) return false;
+    const gate = (gateRef.current ??= new StableGate(PLATE_CROP));
+    if (!gate.shouldSend(video)) return false;
+
+    const t0 = performance.now();
+    const { blob } = await captureJpeg(video, canvas, PLATE_CROP, 960, 0.75);
+    const form = new FormData();
+    form.append("image", blob, "frame.jpg");
+    const r = await fetch("/api/backend/identify", { method: "POST", body: form });
+    const data = await r.json();
+    const ms = Math.round(performance.now() - t0);
+    const kb = Math.round(blob.size / 1024);
+
+    if (data.found && data.plate) {
+      const reads = readsRef.current;
+      reads.push(data.plate);
+      if (reads.length > 3) reads.shift();
+      const agreed = reads.length >= 2 && reads[reads.length - 2] === data.plate;
+      const veryConfident = (data.confidence ?? 0) >= 0.93 && data.format_ok;
+
+      if (agreed || veryConfident) {
+        readsRef.current = [];
+        if (debugRef.current) {
+          const total = ((performance.now() - scanStartRef.current) / 1000).toFixed(1);
+          setDebug(`read in ${total}s since camera opened · last frame ${kb}KB ${ms}ms`);
+        }
+        setPlate(data.plate);
+        setPhoto(data.photo);
+        setHint("");
+        setStep("confirm");
+        navigator.vibrate?.(80);
+        return true;
+      }
+      setHint(data.plate);
+    } else {
+      setHint("");
+    }
+    if (debugRef.current) setDebug(`motion ${gate.motion.toFixed(1)} · ${kb}KB · ${ms}ms`);
+    return true;
+  }, []);
+
+  useScanLoop(captureAndIdentify, step === "camera");
 
   // Countdown for the active session
   useEffect(() => {
@@ -273,6 +281,11 @@ export default function PayPage() {
           className="absolute inset-0 w-full h-full object-cover"
         />
         <canvas ref={canvasRef} className="hidden" />
+        {debug && (
+          <div className="absolute left-2 bottom-2 z-20 rounded bg-black/70 px-2 py-1 font-mono text-[11px] text-white">
+            {debug}
+          </div>
+        )}
 
         {!cameraError && (
           <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
@@ -315,6 +328,7 @@ export default function PayPage() {
   if (step === "confirm") {
     return (
       <main className="flex-1 flex flex-col justify-center px-6 py-10 max-w-md w-full mx-auto stagger">
+        {debug && <p className="mb-3 font-mono text-[11px] text-cloud">{debug}</p>}
         <h1 className="font-serif text-[30px] leading-[1.1] tracking-tight mb-1">
           Start parking
         </h1>

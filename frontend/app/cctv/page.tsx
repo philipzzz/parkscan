@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
+import { ChangeGate, FULL, captureJpeg, useScanLoop } from "@/lib/scan";
 import {
   Cctv,
   Check,
@@ -318,52 +319,44 @@ export default function CctvPage() {
     }
   }, []);
 
-  const scanFrame = useCallback(async () => {
+  // A propped-up device camera doesn't move: only send when the scene changed
+  // (or every few seconds, so payment status stays current).
+  const gateRef = useRef<ChangeGate | null>(null);
+
+  const scanFrame = useCallback(async (): Promise<boolean> => {
     const video = videoRef.current;
     const canvas = captureRef.current;
-    if (!video || !canvas || video.readyState < 2 || busyRef.current) return;
-    busyRef.current = true;
-    try {
-      canvas.width = video.videoWidth;
-      canvas.height = video.videoHeight;
-      canvas.getContext("2d")!.drawImage(video, 0, 0);
-      const blob: Blob = await new Promise((res) =>
-        canvas.toBlob((b) => res(b!), "image/jpeg", 0.85)
-      );
-      const form = new FormData();
-      form.append("image", blob, "frame.jpg");
-      form.append("zone_id", ZONE_ID);
-      const r = await fetch("/api/backend/cctv/scan", { method: "POST", body: form });
-      const data = await r.json();
-      setScans((c) => c + 1);
-      drawOverlay(data.vehicles, data.frame.w, data.frame.h);
+    if (!video || !canvas || video.readyState < 2) return false;
+    const gate = (gateRef.current ??= new ChangeGate(FULL));
+    if (!gate.shouldSend(video)) return false;
+    const { blob } = await captureJpeg(video, canvas, FULL, 1280, 0.8);
+    const form = new FormData();
+    form.append("image", blob, "frame.jpg");
+    form.append("zone_id", ZONE_ID);
+    const r = await fetch("/api/backend/cctv/scan", { method: "POST", body: form });
+    const data = await r.json();
+    setScans((c) => c + 1);
+    drawOverlay(data.vehicles, data.frame.w, data.frame.h);
 
-      const t = Date.now();
-      setTracked((prev) => {
-        const next = { ...prev };
-        for (const d of data.vehicles as Detection[]) {
-          const existing = next[d.plate];
-          next[d.plate] = {
-            ...d,
-            firstSeen: existing?.firstSeen ?? t,
-            lastSeen: t,
-            compoundId: existing?.compoundId,
-          };
-        }
-        return next;
-      });
-    } catch {
-      // transient network error — next tick retries
-    } finally {
-      busyRef.current = false;
-    }
+    const t = Date.now();
+    setTracked((prev) => {
+      const next = { ...prev };
+      for (const d of data.vehicles as Detection[]) {
+        const existing = next[d.plate];
+        next[d.plate] = {
+          ...d,
+          firstSeen: existing?.firstSeen ?? t,
+          lastSeen: t,
+          compoundId: existing?.compoundId,
+        };
+      }
+      return next;
+    });
+    return true;
   }, [drawOverlay]);
 
-  useEffect(() => {
-    if (live) return; // live mode analyses server-side frames instead
-    const id = setInterval(scanFrame, 1500);
-    return () => clearInterval(id);
-  }, [scanFrame, live]);
+  // Live mode analyses server-side frames instead
+  useScanLoop(scanFrame, !live);
 
   async function approveCompound(v: Tracked) {
     setIssuing(v.plate);

@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
+import { FULL, StableGate, captureJpeg, scanDebugEnabled, useScanLoop } from "@/lib/scan";
 import {
   ChevronLeft,
   Check,
@@ -66,7 +67,9 @@ export default function ScanPage() {
   const videoRef = useRef<HTMLVideoElement>(null);
   const captureRef = useRef<HTMLCanvasElement>(null);
   const overlayRef = useRef<HTMLCanvasElement>(null);
-  const busyRef = useRef(false);
+  const gateRef = useRef<StableGate | null>(null);
+  const debugRef = useRef(false);
+  const [debug, setDebug] = useState("");
   const buzzedRef = useRef<Set<string>>(new Set());
   const patrolRef = useRef<Patrol | null>(null);
 
@@ -100,8 +103,9 @@ export default function ScanPage() {
       .getUserMedia({
         video: {
           facingMode: "environment",
-          width: { ideal: 1920 },
-          height: { ideal: 1080 },
+          // 720p: frames are sent at 1280 px wide anyway
+          width: { ideal: 1280 },
+          height: { ideal: 720 },
         },
       })
       .then((s) => {
@@ -173,88 +177,86 @@ export default function ScanPage() {
     []
   );
 
+  useEffect(() => {
+    debugRef.current = scanDebugEnabled();
+  }, []);
+
   // One full-frame pass: detect every plate, draw boxes, keep evidence.
-  const scanFrame = useCallback(async () => {
+  const scanFrame = useCallback(async (): Promise<boolean> => {
     const video = videoRef.current;
     const canvas = captureRef.current;
-    if (!video || !canvas || video.readyState < 2 || busyRef.current) return;
-    busyRef.current = true;
-    try {
-      const vw = video.videoWidth;
-      const vh = video.videoHeight;
-      canvas.width = vw;
-      canvas.height = vh;
-      canvas.getContext("2d")!.drawImage(video, 0, 0, vw, vh);
+    if (!video || !canvas || video.readyState < 2) return false;
+    const gate = (gateRef.current ??= new StableGate(FULL));
+    if (!gate.shouldSend(video)) return false;
 
-      const blob: Blob = await new Promise((res) =>
-        canvas.toBlob((b) => res(b!), "image/jpeg", 0.85)
+    const vw = video.videoWidth;
+    const vh = video.videoHeight;
+    const t0 = performance.now();
+    const { blob } = await captureJpeg(video, canvas, FULL, 1280, 0.8);
+    const form = new FormData();
+    form.append("image", blob, "frame.jpg");
+    form.append("zone_id", patrolRef.current!.zoneId);
+
+    const r = await fetch("/api/backend/cctv/scan", { method: "POST", body: form });
+    const data: { vehicles: Detection[]; frame: { w: number; h: number } } =
+      await r.json();
+    setScanCount((c) => c + 1);
+    drawOverlay(data.vehicles, data.frame.w, data.frame.h);
+    if (debugRef.current) {
+      setDebug(
+        `motion ${gate.motion.toFixed(1)} · ${Math.round(blob.size / 1024)}KB · ${Math.round(performance.now() - t0)}ms`
       );
-      const form = new FormData();
-      form.append("image", blob, "frame.jpg");
-      form.append("zone_id", patrolRef.current!.zoneId);
-
-      const r = await fetch("/api/backend/cctv/scan", { method: "POST", body: form });
-      const data: { vehicles: Detection[]; frame: { w: number; h: number } } =
-        await r.json();
-      setScanCount((c) => c + 1);
-      drawOverlay(data.vehicles, data.frame.w, data.frame.h);
-
-      // A single downscaled snapshot of this frame becomes the evidence photo
-      // for any plate read in it — the actual car, at the moment it was seen.
-      let snapshot: string | null = null;
-      if (data.vehicles.some((v) => v.status === "unpaid" || v.status === "uncertain")) {
-        const shot = document.createElement("canvas");
-        const sw = Math.min(960, vw);
-        shot.width = sw;
-        shot.height = Math.round((vh / vw) * sw);
-        shot.getContext("2d")!.drawImage(video, 0, 0, shot.width, shot.height);
-        snapshot = shot.toDataURL("image/jpeg", 0.6);
-      }
-
-      const t = Date.now();
-      setTracked((prev) => {
-        const next = { ...prev };
-        for (const d of data.vehicles) {
-          const existing = next[d.plate];
-          next[d.plate] = {
-            ...d,
-            firstSeen: existing?.firstSeen ?? t,
-            lastSeen: t,
-            // keep the old evidence photo if we didn't take a fresh one
-            photo: snapshot ?? existing?.photo ?? null,
-            // never downgrade a car we've already fined
-            status: existing?.compoundId ? "compounded" : d.status,
-            compoundId: existing?.compoundId,
-          };
-        }
-        return next;
-      });
-
-      for (const d of data.vehicles) {
-        if (d.status === "unpaid" && !buzzedRef.current.has(d.plate)) {
-          buzzedRef.current.add(d.plate);
-          navigator.vibrate?.([90, 50, 90]);
-        }
-      }
-    } catch {
-      // transient network error — the next tick retries
-    } finally {
-      busyRef.current = false;
     }
+
+    // A single downscaled snapshot of this frame becomes the evidence photo
+    // for any plate read in it — the actual car, at the moment it was seen.
+    let snapshot: string | null = null;
+    if (data.vehicles.some((v) => v.status === "unpaid" || v.status === "uncertain")) {
+      const shot = document.createElement("canvas");
+      const sw = Math.min(960, vw);
+      shot.width = sw;
+      shot.height = Math.round((vh / vw) * sw);
+      shot.getContext("2d")!.drawImage(video, 0, 0, shot.width, shot.height);
+      snapshot = shot.toDataURL("image/jpeg", 0.6);
+    }
+
+    const t = Date.now();
+    setTracked((prev) => {
+      const next = { ...prev };
+      for (const d of data.vehicles) {
+        const existing = next[d.plate];
+        next[d.plate] = {
+          ...d,
+          firstSeen: existing?.firstSeen ?? t,
+          lastSeen: t,
+          // keep the old evidence photo if we didn't take a fresh one
+          photo: snapshot ?? existing?.photo ?? null,
+          // never downgrade a car we've already fined
+          status: existing?.compoundId ? "compounded" : d.status,
+          compoundId: existing?.compoundId,
+        };
+      }
+      return next;
+    });
+
+    for (const d of data.vehicles) {
+      if (d.status === "unpaid" && !buzzedRef.current.has(d.plate)) {
+        buzzedRef.current.add(d.plate);
+        navigator.vibrate?.([90, 50, 90]);
+      }
+    }
+    return true;
   }, [drawOverlay]);
 
   // Scan continuously, but pause while the officer is reviewing a plate so the
   // list underneath the sheet stops shifting around.
   const paused = view !== "scan" || selected !== null;
   useEffect(() => {
-    if (paused || cameraError) {
-      const o = overlayRef.current;
-      o?.getContext("2d")?.clearRect(0, 0, o.width, o.height);
-      return;
-    }
-    const id = setInterval(scanFrame, 800);
-    return () => clearInterval(id);
-  }, [scanFrame, paused, cameraError]);
+    if (!paused && !cameraError) return;
+    const o = overlayRef.current;
+    o?.getContext("2d")?.clearRect(0, 0, o.width, o.height);
+  }, [paused, cameraError]);
+  useScanLoop(scanFrame, !paused && !cameraError);
 
   // Tick so "Xs ago" and the auto-expiry of stale cars stay live
   useEffect(() => {
@@ -372,6 +374,11 @@ export default function ScanPage() {
         className="absolute inset-0 w-full h-full pointer-events-none z-10"
       />
       <canvas ref={captureRef} className="hidden" />
+      {debug && (
+        <div className="absolute left-2 top-20 z-30 rounded bg-black/70 px-2 py-1 font-mono text-[11px] text-white">
+          {debug}
+        </div>
+      )}
 
       {cameraError && (
         <div className="absolute inset-0 z-20 flex items-center justify-center p-8 bg-ivory">
